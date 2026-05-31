@@ -2,6 +2,7 @@
 /* eslint-disable @typescript-eslint/no-var-requires */
 
 const { PHASE_DEVELOPMENT_SERVER } = require('next/constants');
+const webpack = require('webpack');
 
 // 检测是否为 Cloudflare Pages 构建
 const isCloudflare = process.env.CF_PAGES === '1' || process.env.BUILD_TARGET === 'cloudflare';
@@ -33,8 +34,28 @@ const serverExternalPackages = [
   'xpath',
 ];
 
+// 仅在 Cloudflare 或非开发环境下排除 6b85c446 和 706b2fe 引入的 external 包；
+// 其它未来加入的 server external 包不受影响。
+const buildExcludedServerExternalPackages = [
+  '@upstash/redis',
+  'uncrypto',
+  '@vercel/postgres',
+  'better-sqlite3',
+  'cheerio',
+  'nodemailer',
+  'pg',
+  'redis',
+  'socket.io',
+  'xml2js',
+  'xpath',
+];
+
 const createNextConfig = (phase) => {
   const isDevelopment = phase === PHASE_DEVELOPMENT_SERVER || process.env.NODE_ENV === 'development';
+  const effectiveServerExternalPackages =
+    isCloudflare || !isDevelopment
+      ? serverExternalPackages.filter((pkg) => !buildExcludedServerExternalPackages.includes(pkg))
+      : serverExternalPackages;
 
   const nextConfig = {
   // Cloudflare Pages 不支持 standalone，使用默认输出
@@ -51,7 +72,9 @@ const createNextConfig = (phase) => {
   experimental: {
     instrumentationHook: process.env.NODE_ENV === 'production' && !isCloudflare,
     optimizePackageImports: optimizedPackageImports,
-    serverComponentsExternalPackages: serverExternalPackages,
+    ...(effectiveServerExternalPackages.length
+      ? { serverComponentsExternalPackages: effectiveServerExternalPackages }
+      : {}),
     webpackBuildWorker: !isCloudflare,
   },
 
@@ -105,6 +128,26 @@ const createNextConfig = (phase) => {
       tls: false,
       crypto: false,
     };
+
+    // Cloudflare 使用 D1，不需要把 better-sqlite3 原生模块带入 Worker 产物。
+    if (isCloudflare) {
+      config.plugins.push(
+        new webpack.IgnorePlugin({
+          resourceRegExp: /^better-sqlite3$/,
+        })
+      );
+      config.resolve.alias = {
+        ...config.resolve.alias,
+        'better-sqlite3': false,
+      };
+      config.externals = (config.externals || []).filter((external) => {
+        return !(
+          external &&
+          typeof external === 'object' &&
+          Object.prototype.hasOwnProperty.call(external, 'better-sqlite3')
+        );
+      });
+    }
 
     // Exclude better-sqlite3, D1, and Postgres modules from client-side bundle
     if (!isServer) {
